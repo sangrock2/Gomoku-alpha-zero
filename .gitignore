@@ -1,0 +1,14 @@
+# Python 관련
+__pycache__/
+*.py[cod]
+.venv/
+env/
+  
+# 모델, 로그
+models/
+*.pth.tar
+*.h5
+
+# VSCode, JetBrains 등 IDE 설정
+.vscode/
+.idea/

@@ -1,3 +1,10 @@
+import os
+
+base_dir = os.getcwd()
+alpha_dir = os.path.join(base_dir, 'alpha_zero_general')
+os.environ['PYTHONPATH'] = alpha_dir
+
+
 from alpha_zero_general.main import main
 
 if __name__ == '__main__':

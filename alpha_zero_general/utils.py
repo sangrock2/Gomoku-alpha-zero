@@ -19,4 +19,17 @@ class AverageMeter(object):
 
 class dotdict(dict):
     def __getattr__(self, name):
-        return self[name]
+        try:
+            return self[name]
+        except KeyError:
+            raise AttributeError(name)
+    
+    def __deepcopy__(self, memo):
+        from copy import deepcopy
+
+        cls = self.__class__
+        result = cls()
+        memo[id(self)] = result
+        for k, v in self.items():
+            result[k] = deepcopy(v, memo)
+        return result

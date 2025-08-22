@@ -12,15 +12,23 @@ from NeuralNet import NeuralNet
 
 import torch
 import torch.optim as optim
+import torch.backends.cudnn as cudnn
+from torch.amp  import grad_scaler, autocast_mode
 from .GobangNNet import GobangNNet as onnet
+
+cudnn.benchmark = True
+try:
+    torch.set_float32_matmul_precision('high')
+except Exception:
+    pass
 
 args = dotdict({
     'lr': 0.0005,
-    'dropout': 0.3,
-    'epochs': 15,
+    'dropout': 0.2,
+    'epochs': 8,
     'batch_size': 64,
     'cuda': torch.cuda.is_available(),
-    'num_channels': 512,
+    'num_channels': 128,
 })
 
 class NNetWrapper(NeuralNet):
@@ -28,6 +36,7 @@ class NNetWrapper(NeuralNet):
         self.nnet = onnet(game, args)
         self.board_x, self.board_y = game.getBoardSize()
         self.action_size     = game.getActionSize()
+
         if args.cuda:
             self.nnet.cuda()
 
@@ -38,6 +47,8 @@ class NNetWrapper(NeuralNet):
         target_vs    = np.asarray(target_vs,    dtype=np.float32)
 
         optimizer = optim.Adam(self.nnet.parameters(), lr=args.lr)
+
+        scaler = grad_scaler.GradScaler("cuda")
 
         for epoch in range(args.epochs):
             print(f'EPOCH ::: {epoch+1}')
@@ -57,17 +68,25 @@ class NNetWrapper(NeuralNet):
                     boards, pis, vs = boards.cuda(), pis.cuda(), vs.cuda()
 
                 optimizer.zero_grad()
-                out_pi, out_v = self.nnet(boards)
-                l_pi = self.loss_pi(pis, out_pi)
-                l_v  = self.loss_v(vs, out_v)
-                loss = l_pi + l_v
+
+                with autocast_mode.autocast("cuda"):
+                    out_pi, out_v = self.nnet(boards)
+                    l_pi = self.loss_pi(pis, out_pi)
+                    l_v  = self.loss_v(vs, out_v)
+                    loss = l_pi + l_v
 
                 pi_losses.update(l_pi.item(), boards.size(0))
                 v_losses.update(l_v.item(),  boards.size(0))
                 loop.set_postfix(Loss_pi=pi_losses, Loss_v=v_losses)
 
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+
+                '''
                 loss.backward()
                 optimizer.step()
+                '''
 
     def predict(self, board):
         board = torch.from_numpy(board.astype(np.float32))
@@ -77,10 +96,22 @@ class NNetWrapper(NeuralNet):
 
         self.nnet.eval()
         with torch.no_grad():
-            log_pi, v = self.nnet(board)
+            if args.cuda:
+                with autocast_mode.autocast('cuda'):
+                    log_pi, v = self.nnet(board)
+            else:
+                log_pi, v = self.nnet(board)
 
         pi = torch.exp(log_pi).cpu().numpy()[0]
-        return pi, v.cpu().numpy()[0]
+        v = v.cpu().numpy()[0]
+
+        ssum = np.sum(pi)
+        if not np.isfinite(ssum) or ssum <= 0:
+            pi = np.ones(self.action_size, dtype=np.float32 / float(self.action_size))
+
+        return pi, v
+    
+    
 
     def loss_pi(self, targets, outputs):
         return -torch.sum(targets * outputs) / targets.size(0)
@@ -96,22 +127,13 @@ class NNetWrapper(NeuralNet):
     def load_checkpoint(self, folder='checkpoint', filename='checkpoint.pth.tar'):
         filepath = os.path.join(folder, filename)
 
-        print("Loading checkpoint from", filepath)
-
         if not os.path.exists(filepath):
             raise FileNotFoundError(f"No model in path {filepath}")
         map_location = None if args.cuda else 'cpu'
 
         checkpoint = torch.load(filepath, map_location=map_location)
 
-        print("State dict keys:", list(checkpoint['state_dict'].keys())[:5])
-
-        
         self.nnet.load_state_dict(checkpoint['state_dict'])
-
-        print("Loaded state dict successfully.")
-
-
 
 '''
 import argparse

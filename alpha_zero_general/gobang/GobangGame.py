@@ -29,11 +29,19 @@ class GobangGame(Game):
         # action must be a valid move
         if action == self.n * self.n:
             return (board, -player)
+        
+        '''
         b = Board(self.n)
         b.pieces = np.copy(board)
         move = (int(action / self.n), action % self.n)
         b.execute_move(move, player)
         return (b.pieces, -player)
+        '''
+
+        b2 = board.copy()
+        y, x = divmod(action, self.n)
+        b2[y, x] = player
+        return (b2, -player)
 
     # modified
     def getValidMoves(self, board, player):
@@ -56,6 +64,8 @@ class GobangGame(Game):
         b = Board(self.n)
         b.pieces = np.copy(board)
         n = self.n_in_row
+
+        print("이거는 나오면 안됨 / 게임종료")
 
         for w in range(self.n):
             for h in range(self.n):
@@ -86,6 +96,17 @@ class GobangGame(Game):
         pi_board = np.reshape(pi[:-1], (self.n, self.n))
         l = []
 
+        #test
+        for i in range(4):
+            newB = np.rot90(board, i).copy()
+            newPi = np.rot90(pi_board, i).copy()
+            l += [(newB, list(newPi.ravel()) + [pi[-1]])]
+
+            newB2 = np.fliplr(newB).copy()
+            newPi2 = np.fliplr(newPi).copy()
+            l += [(newB2, list(newPi2.ravel()) + [pi[-1]])]
+
+        '''
         for i in range(1, 5):
             for j in [True, False]:
                 newB = np.rot90(board, i)
@@ -94,6 +115,7 @@ class GobangGame(Game):
                     newB = np.fliplr(newB)
                     newPi = np.fliplr(newPi)
                 l += [(newB, list(newPi.ravel()) + [pi[-1]])]
+        '''
         return l
 
     def stringRepresentation(self, board):

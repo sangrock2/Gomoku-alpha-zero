@@ -1,18 +1,24 @@
-import logging
-import os
-import sys
-from collections import deque
+from multiprocessing.dummy import Pool
 from pickle import Pickler, Unpickler
+from collections import deque
 from random import shuffle
-
-import numpy as np
 from tqdm import tqdm
 
+import logging, os, sys, hashlib, math
+import numpy as np
+import torch
+
+from copy import deepcopy
 from Arena import Arena
 from MCTS import MCTS
 
 log = logging.getLogger(__name__)
 
+def hash_params(model):
+    h = hashlib.sha1()
+    for p in model.parameters():
+        h.update(p.detach().cpu().numpy().tobytes())
+    return h.hexdigest()
 
 class Coach():
     """
@@ -28,6 +34,7 @@ class Coach():
         self.mcts = MCTS(self.game, self.nnet, self.args)
         self.trainExamplesHistory = []  # history of examples from args.numItersForTrainExamplesHistory latest iterations
         self.skipFirstSelfPlay = False  # can be overriden in loadTrainExamples()
+
 
     def executeEpisode(self):
         """
@@ -46,6 +53,7 @@ class Coach():
                            the player eventually won the game, else -1.
         """
         trainExamples = []
+        local_mcts = MCTS(self.game, self.nnet, self.args)
         board = self.game.getInitBoard()
         self.curPlayer = 1
         episodeStep = 0
@@ -54,8 +62,8 @@ class Coach():
             episodeStep += 1
             canonicalBoard = self.game.getCanonicalForm(board, self.curPlayer)
             temp = int(episodeStep < self.args.tempThreshold)
-
-            pi = self.mcts.getActionProb(canonicalBoard, temp=temp)
+            pi = local_mcts.getActionProb(canonicalBoard, temp=temp)
+            
             sym = self.game.getSymmetries(canonicalBoard, pi)
             for b, p in sym:
                 trainExamples.append([b, self.curPlayer, p, None])
@@ -63,10 +71,16 @@ class Coach():
             action = np.random.choice(len(pi), p=pi)
             board, self.curPlayer = self.game.getNextState(board, self.curPlayer, action)
 
+            #print(f'step : {episodeStep}')
+
             r = self.game.getGameEnded(board, self.curPlayer)
 
             if r != 0:
-                return [(x[0], x[2], r * ((-1) ** (x[1] != self.curPlayer))) for x in trainExamples]
+                if abs(r) < 1e-3:
+                    return [(s, p, 0.0) for (s, cur, p, _) in trainExamples]
+                
+                return [(s, p, float(r * cur)) for (s, cur, p, _) in trainExamples]
+                #return [(x[0], x[2], r * ((-1) ** (x[1] != self.curPlayer))) for x in trainExamples]
 
     def learn(self):
         """
@@ -82,18 +96,28 @@ class Coach():
             log.info(f'Starting Iter #{i} ...')
             # examples of the iteration
             if not self.skipFirstSelfPlay or i > 1:
-                iterationTrainExamples = deque([], maxlen=self.args.maxlenOfQueue)
+                # 커스텀
+                iterationExamples  = deque([], maxlen=self.args.maxlenOfQueue)
 
+                with Pool(processes=1) as pool:
+                    it = pool.imap_unordered(lambda _: self.executeEpisode(), range(self.args.numEps), chunksize=1)
+
+                    for eps in tqdm(it, total=self.args.numEps, desc=f"Iter {i} Self-play"):
+                        iterationExamples.extend(eps)
+
+                self.trainExamplesHistory.append(iterationExamples)
+
+                '''
                 for _ in tqdm(range(self.args.numEps), desc="Self Play"):
                     self.mcts = MCTS(self.game, self.nnet, self.args)  # reset search tree
                     iterationTrainExamples += self.executeEpisode()
 
                 # save the iteration examples to the history 
                 self.trainExamplesHistory.append(iterationTrainExamples)
+                '''
 
             if len(self.trainExamplesHistory) > self.args.numItersForTrainExamplesHistory:
-                log.warning(
-                    f"Removing the oldest entry in trainExamples. len(trainExamplesHistory) = {len(self.trainExamplesHistory)}")
+                log.warning(f"Removing the oldest entry in trainExamples. len(trainExamplesHistory) = {len(self.trainExamplesHistory)}")
                 self.trainExamplesHistory.pop(0)
             # backup history to a file
             # NB! the examples were collected using the model from the previous iteration, so (i-1)  
@@ -108,15 +132,22 @@ class Coach():
             # training new network, keeping a copy of the old one
             self.nnet.save_checkpoint(folder=self.args.checkpoint, filename='temp.pth.tar')
             self.pnet.load_checkpoint(folder=self.args.checkpoint, filename='temp.pth.tar')
-            pmcts = MCTS(self.game, self.pnet, self.args)
-
             self.nnet.train(trainExamples)
-            nmcts = MCTS(self.game, self.nnet, self.args)
+
+            eval_args = deepcopy(self.args)
+            if getattr(self.args, "numMCTSSims", None) is not None:
+                eval_args.numMCTSSims = max(200, self.args.numMCTSSims // 2)
+
+            pmcts = MCTS(self.game, self.pnet, eval_args, eval_mode=True)
+            nmcts = MCTS(self.game, self.nnet, eval_args, eval_mode=True)
 
             log.info('PITTING AGAINST PREVIOUS VERSION')
             arena = Arena(lambda x: np.argmax(pmcts.getActionProb(x, temp=0)),
                           lambda x: np.argmax(nmcts.getActionProb(x, temp=0)), self.game)
-            pwins, nwins, draws = arena.playGames(self.args.arenaCompare)
+            
+            max_games = int(self.args.arenaCompare)
+            target = int(math.ceil(self.args.updateThreshold * max_games))
+            pwins, nwins, draws = arena.playGames_early(max_games=max_games, target_wins=target)
 
             log.info('NEW/PREV WINS : %d / %d ; DRAWS : %d' % (nwins, pwins, draws))
             if pwins + nwins == 0 or float(nwins) / (pwins + nwins) < self.args.updateThreshold:

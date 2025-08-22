@@ -1,0 +1,229 @@
+import numpy as np
+from copy import deepcopy
+from typing import List, Tuple, Set
+
+try:
+    from numba import njit, int8, int16
+    _njit = njit(cache=True, fastmath=True)
+    _i8 = int8; _i16 = int16
+except Exception:
+    _njit = lambda f: f
+    class _i8(int): pass
+    class _i16(int): pass
+
+BLACK, EMPTY = 1, 0
+DIRS = ((0, 0), (1,0),(0,1),(1,1),(1,-1))
+
+@_njit
+def in_bounds(board, x, y):
+    n = board.shape[0]
+    return 0 <= x < n and 0 <= y < n
+
+@_njit
+def count_in_dir(board, x, y, stone, dx, dy):
+    n = board.shape[0]
+    cnt, nx, ny = 0, x + dx, y + dy
+    while 0 <= nx < n and 0 <= ny < n and board[ny, nx] == stone:
+        cnt += 1; nx += dx; ny += dy
+    return cnt
+
+@_njit
+def check_five_or_overline(board, x, y, stone=BLACK, dir_mask=15):
+    if not in_bounds(board, x, y) or board[y, x] != EMPTY:
+        return 0
+    orig = board[y, x]
+    board[y, x] = stone
+
+    is_over = False
+    for k in range(4):                 # 0..3 방향
+        bit = 1 << k
+        if (dir_mask & bit) == 0:
+            continue
+        dx, dy = DIRS[k+1]
+        n_line = 1 + count_in_dir(board, x, y, stone, dx, dy) \
+                   + count_in_dir(board, x, y, stone, -dx, -dy)
+        if n_line == 5:
+            board[y, x] = orig
+            return 1
+        if n_line >= 6:
+            is_over = True
+
+    board[y, x] = orig
+    return 2 if is_over else 0
+
+def check_is_five(n_line):
+    """0:해당없음, 1:정확히5, 2:장목(6+)  — 흑 전용(6목은 금수)"""
+    if n_line >= 5:
+        return 1 if n_line == 5 else 2
+    return 0
+
+def is_five(board, x, y, dir_id=15):
+    mask = (1 << (dir_id - 1)) if dir_id in (1,2,3,4) else 15
+    return check_five_or_overline(board, x, y, BLACK, dir_mask=mask) == 1
+
+def is_overline(board, x, y, dir_id=15):
+    mask = (1 << (dir_id - 1)) if dir_id in (1,2,3,4) else 15
+    return check_five_or_overline(board, x, y, BLACK, dir_mask=mask) == 2
+
+def is_four(board, x, y, dir_id):
+    """(x,y)에 두었을 때, 그 방향의 한쪽 끝 빈칸에 '한 수' 더 두면 5가 되는 형태가 존재하는가"""
+    if board[y][x] != EMPTY or is_five(board, x, y) or is_overline(board, x, y):
+        return False
+    dx, dy = DIRS[dir_id]
+    board[y][x] = BLACK
+    try:
+        # 반대쪽
+        i, j = x - dx, y - dy
+        while True:
+            if in_bounds(board, i, j) and board[j][i] == BLACK:
+                i -= dx; j -= dy
+                continue
+            elif in_bounds(board, i, j) and board[j][i] == EMPTY:
+                if is_five(board, i, j, dir_id):
+                    return True
+                break
+            else:
+                break
+        # 정방향
+        i, j = x + dx, y + dy
+        while True:
+            if in_bounds(board, i, j) and board[j][i] == BLACK:
+                i += dx; j += dy
+                continue
+            elif in_bounds(board, i, j) and board[j][i] == EMPTY:
+                if is_five(board, i, j, dir_id):
+                    return True
+                break
+            else:
+                break
+        return False
+    finally:
+        board[y][x] = EMPTY
+
+def is_open_four(board, x, y, dir_id):
+    """
+    0:아님, 1:단일 열린4(열린3 판정용), 2:양방향 '열린4 패턴'(44 카운트용 가중치 2)
+    """
+    if board[y][x] != EMPTY or is_five(board, x, y) or is_overline(board, x, y):
+        return 0
+    dx, dy = DIRS[dir_id]
+    n_line = 1
+    board[y][x] = BLACK
+    try:
+        # 반대쪽에서 첫 빈칸이 '그 자리에 두면 5'가 아니면 열린4 성립 X
+        i, j = x - dx, y - dy
+        while True:
+            if in_bounds(board, i, j) and board[j][i] == BLACK:
+                n_line += 1
+                i -= dx; j -= dy
+                continue
+            elif in_bounds(board, i, j) and board[j][i] == EMPTY:
+                if not is_five(board, i, j, dir_id):
+                    return 0
+                break
+            else:
+                return 0
+        # 정방향도 같은 조건: 둘 다 만족이면 (n_line==4 ? 1 : 2)
+        i, j = x + dx, y + dy
+        while True:
+            if in_bounds(board, i, j) and board[j][i] == BLACK:
+                n_line += 1
+                i += dx; j += dy
+                continue
+            elif in_bounds(board, i, j) and board[j][i] == EMPTY:
+                if is_five(board, i, j, dir_id):
+                    return 1 if n_line == 4 else 2
+                break
+            else:
+                break
+        return 0
+    finally:
+        board[y][x] = EMPTY
+
+def check_fake_three(board, x, y, dir_id):
+    """ 열린3 후보 자리 (x,y): """
+    if is_open_four(board, x, y, dir_id) != 1:
+        return False
+    if is_double_four(board, x, y):   # 자기 자신이 44면 페이크
+        return False
+    if is_double_three(board, x, y):  # 자기 자신이 33이면 페이크
+        return False
+    return True
+
+def is_open_three(board, x, y, dir_id):
+    """열린3: (x,y)에 두고 같은 방향 인접 빈칸에 한 수 더 두면 '단일 열린4'가 되는 경우가 존재"""
+    if board[y][x] != EMPTY or is_five(board, x, y) or is_overline(board, x, y):
+        return False
+    dx, dy = DIRS[dir_id]
+    board[y][x] = BLACK
+    try:
+        # 반대쪽
+        i, j = x - dx, y - dy
+        while in_bounds(board, i, j):
+            if board[j][i] == BLACK:
+                i -= dx; j -= dy
+                continue
+            elif board[j][i] == EMPTY:
+                if check_fake_three(board, i, j, dir_id):
+                    return True
+                break
+            else:
+                break
+        # 정방향
+        i, j = x + dx, y + dy
+        while in_bounds(board, i, j):
+            if board[j][i] == BLACK:
+                i += dx; j += dy
+                continue
+            elif board[j][i] == EMPTY:
+                if check_fake_three(board, i, j, dir_id):
+                    return True
+                break
+            else:
+                break
+        return False
+    finally:
+        board[y][x] = EMPTY
+
+def is_double_three(board, x, y):
+    """흑 33 금지: 서로 다른 방향에서 열린3이 2개 이상"""
+    if board[y][x] != EMPTY or is_five(board, x, y) or is_overline(board, x, y):
+        return False
+    cnt = 0
+    for d in (1, 2, 3, 4):
+        if is_open_three(board, x, y, d):
+            cnt += 1
+    return cnt >= 2
+
+def is_double_four(board, x, y):
+    """흑 44 금지: 열린4(=2로 카운트) 또는 닫힌4 조합의 합계가 2 이상"""
+    if board[y][x] != 0 or is_five(board, x, y) or is_overline(board, x, y):
+        return False
+    
+    cnt = 0
+    for d in (1, 2, 3, 4):
+        of = is_open_four(board, x, y, d)
+        if of == 2:
+            cnt += 2
+        elif is_four(board, x, y, d):
+            cnt += 1
+    return cnt >= 2
+
+# ---- 공개 API ----
+
+def is_forbidden_nb(board, x, y, n=15, stone=+1):
+    if not in_bounds(board, x, y) or board[y][x] != EMPTY:
+        return False
+    if is_five(board, x, y):
+        return False
+    if is_overline(board, x, y):
+        return True
+    if is_double_four(board, x, y):
+        return True
+    if is_double_three(board, x, y):
+        return True
+    return False
+
+
+
+

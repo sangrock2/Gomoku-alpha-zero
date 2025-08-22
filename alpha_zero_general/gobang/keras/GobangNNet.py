@@ -19,11 +19,28 @@ class GobangNNet(nn.Module):
         self.bn1   = nn.BatchNorm2d(nc)
         self.conv2 = nn.Conv2d(nc,   nc, 3, padding=1)
         self.bn2   = nn.BatchNorm2d(nc)
-        self.conv3 = nn.Conv2d(nc,   nc, 3)      # valid
+        self.conv3 = nn.Conv2d(nc,   nc, 3, padding=1)      # valid
         self.bn3   = nn.BatchNorm2d(nc)
-        self.conv4 = nn.Conv2d(nc,   nc, 3)      # valid
+        self.conv4 = nn.Conv2d(nc,   nc, 3, padding=1)      # valid
         self.bn4   = nn.BatchNorm2d(nc)
 
+        # Global Average Pooling 후 채널 축소
+        self.head_channels = 128
+        self.reduce = nn.Conv2d(nc, self.head_channels, 1)
+
+        # Policy head
+        self.pi_conv1 = nn.Conv2d(nc, 32, kernel_size=1)
+        self.pi_bn1 = nn.BatchNorm2d(32)
+        self.pi_conv2 = nn.Conv2d(32, 1, kernel_size=1)
+        #self.pi_fc = nn.Linear(self.head_channels, self.action_size)
+
+        # Value head
+        self.v_reduce = nn.Conv2d(nc, 128, kernel_size=1)
+        self.v_fc1 = nn.Linear(128, 64)
+        self.v_fc2 = nn.Linear(64, 1)
+
+
+        '''
         flat_dim = nc * (bx-2-2) * (by-2-2)
         self.fc1  = nn.Linear(flat_dim, 1024)
         self.bn_fc1 = nn.BatchNorm1d(1024)
@@ -32,6 +49,7 @@ class GobangNNet(nn.Module):
 
         self.fc_pi = nn.Linear(512,    self.action_size)
         self.fc_v  = nn.Linear(512,    1)
+        '''
 
     def forward(self, s):
         # s: batch x bx x by
@@ -40,7 +58,26 @@ class GobangNNet(nn.Module):
         x = F.relu(self.bn1(self.conv1(x)))
         x = F.relu(self.bn2(self.conv2(x)))
         x = F.relu(self.bn3(self.conv3(x)))
-        x = F.relu(self.bn4(self.conv4(x)))
+        feat = F.relu(self.bn4(self.conv4(x)))
+        #x = F.relu(self.bn4(self.conv4(x)))
+
+
+        # Policy
+        p = F.relu(self.pi_bn1(self.pi_conv1(feat)))
+        p = self.pi_conv2(p).view(b, -1)
+        pass_logit = p.new_full((b, 1), -10.0)
+        pi_logits = torch.cat([p, pass_logit], dim=1)
+        log_pi = F.log_softmax(pi_logits, dim=1)
+
+        # Value
+        v = F.relu(self.v_reduce(feat))          # (B,128,n,n)
+        v = F.adaptive_avg_pool2d(v, 1).view(b, -1)
+        v = F.relu(self.v_fc1(v))
+        v = torch.tanh(self.v_fc2(v))
+
+        return log_pi, v
+
+        '''
         x = x.view(b, -1)
         x = F.dropout(F.relu(self.bn_fc1(self.fc1(x))), p=self.args.dropout, training=self.training)
         x = F.dropout(F.relu(self.bn_fc2(self.fc2(x))), p=self.args.dropout, training=self.training)
@@ -48,6 +85,9 @@ class GobangNNet(nn.Module):
         pi = self.fc_pi(x)                # logits
         v  = self.fc_v(x)                 # scalar
         return F.log_softmax(pi, dim=1), torch.tanh(v)
+        '''
+
+
 
 '''
 import argparse

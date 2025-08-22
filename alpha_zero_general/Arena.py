@@ -1,6 +1,7 @@
 import logging
 
 from tqdm import tqdm
+import numpy as np, random
 
 log = logging.getLogger(__name__)
 
@@ -37,10 +38,24 @@ class Arena():
             or
                 draw result returned from the game that is neither 1, -1, nor 0.
         """
+        
+
         players = [self.player2, None, self.player1]
         curPlayer = 1
         board = self.game.getInitBoard()
         it = 0
+
+        opening_k = getattr(self, "opening_k", 0)
+
+        for _ in range(opening_k):
+            can = self.game.getCanonicalForm(board, curPlayer)
+            valids = self.game.getValidMoves(can, 1)
+            cand = np.flatnonzero(valids[:-1])
+            if cand.size == 0:
+                break
+            a = int(random.choice(cand))
+            board, curPlayer = self.game.getNextState(board, curPlayer, a)
+
 
         for player in players[0], players[2]:
             if hasattr(player, "startGame"):
@@ -76,9 +91,48 @@ class Arena():
             assert self.display
             print("Game over: Turn ", str(it), "Result ", str(self.game.getGameEnded(board, 1)))
             self.display(board)
-        return curPlayer * self.game.getGameEnded(board, curPlayer)
+        return self.game.getGameEnded(board, 1)
+    
+    def playGames_early(self, max_games, target_wins, verbose=False):
+        oneWon = twoWon = draws = 0
+        num = max_games
+        half = num // 2
 
-    def playGames(self, num, verbose=False):
+        for _ in tqdm(range(half), desc="Arena.playGames (1)"):
+            gameResult = self.playGame(verbose=verbose)
+            if gameResult == 1:
+                oneWon += 1
+            elif gameResult == -1:
+                twoWon += 1
+            else:
+                draws += 1
+
+            finished = self._early_stop_check(twoWon, oneWon, draws, target_wins, num, one_is_prev=True)
+            if finished:
+                return oneWon, twoWon, draws
+        
+        self.player1, self.player2 = self.player2, self.player1
+        for _ in tqdm(range(num-half), desc="Arena.playGames (2)"):
+            gameResult = self.playGame(verbose=verbose)
+
+            if gameResult == -1:  
+                oneWon += 1
+            elif gameResult == 1: 
+                twoWon += 1
+            else:                 
+                draws += 1
+            
+            finished = self._early_stop_check(twoWon, oneWon, draws, target_wins, num, one_is_prev=False)
+            if finished:
+                self.player1, self.player2 = self.player2, self.player1
+                return oneWon, twoWon, draws
+        
+        self.player1, self.player2 = self.player2, self.player1
+        return oneWon, twoWon, draws
+
+
+
+    def playGames(self, num, verbose=False, swap_colors=True):
         """
         Plays num games in which player1 starts num/2 games and player2 starts
         num/2 games.
@@ -88,8 +142,55 @@ class Arena():
             twoWon: games won by player2
             draws:  games won by nobody
         """
+    
+        num = int(num)
+        first = num // 2
+        second = num - first
+        oneWon = 0
+        twoWon = 0
+        draws = 0
 
-        num = int(num / 2)
+        for _ in tqdm(range(first), desc="Arena.playGames (1)"):
+            gameResult = self.playGame(verbose=verbose)
+            if gameResult == 1:
+                oneWon += 1
+            elif gameResult == -1:
+                twoWon += 1
+            else:
+                draws += 1
+
+        if swap_colors and second > 0:
+            self.player1, self.player2 = self.player2, self.player1
+
+            for _ in tqdm(range(second), desc="Arena.playGames (2)"):
+                gameResult = self.playGame(verbose=verbose)
+
+                if gameResult == -1:  
+                    oneWon += 1
+                elif gameResult == 1: 
+                    twoWon += 1
+                else:                 
+                    draws += 1
+
+        self.player1, self.player2 = self.player2, self.player1
+
+        return oneWon, twoWon, draws
+    
+    @staticmethod
+    def _early_stop_check(newWins, prevWins, draws, target_wins, max_games, one_is_prev):
+        played = newWins + prevWins + draws
+        remain = max_games - played
+
+        if newWins >= target_wins:
+            return True
+        
+        if newWins + remain < target_wins:
+            return True
+        return False
+
+
+'''
+num = int(num / 2)
         oneWon = 0
         twoWon = 0
         draws = 0
@@ -114,3 +215,5 @@ class Arena():
                 draws += 1
 
         return oneWon, twoWon, draws
+
+'''
